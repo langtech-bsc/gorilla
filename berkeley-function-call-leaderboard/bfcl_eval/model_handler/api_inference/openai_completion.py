@@ -231,6 +231,7 @@ class OpenAICompletionsHandler(BaseHandler):
     
             # For your own /v1 model: optionally pass reasoning into the next turn.
             if preserve_reasoning_in_history:
+                assistant_message["reasoning"] = reasoning_content
                 assistant_message["reasoning_content"] = reasoning_content
 
         response_data["model_responses_message_for_chat_history"] = assistant_message
