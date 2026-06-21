@@ -130,7 +130,12 @@ class OpenAICompletionsHandler(BaseHandler):
             "input_token": api_response.usage.prompt_tokens,
             "output_token": api_response.usage.completion_tokens,
         }
-        return self._add_reasoning_content_if_available_FC(api_response, response_data)
+        self._add_reasoning_content_if_available_FC(
+            api_response,
+            response_data,
+            preserve_reasoning_in_history=True,  # si tu /v1 quiere recibir reasoning anterior
+        )
+        return response_data
 
     def add_first_turn_message_FC(
         self, inference_data: dict, first_turn_message: list[dict]
@@ -172,49 +177,63 @@ class OpenAICompletionsHandler(BaseHandler):
         return inference_data
 
     def _add_reasoning_content_if_available_FC(
-        self, api_response: Any, response_data: dict
+        self,
+        api_response: Any,
+        response_data: dict,
+        *,
+        preserve_reasoning_in_history: bool = False,
     ) -> None:
         """
-        OpenAI models don't show reasoning content in the api response,
-        but many other models that use the OpenAI interface do, such as DeepSeek and Grok.
-        This method is included here to avoid code duplication.
-
-        These models often don't take reasoning content in the chat history for next turn.
-        Thus, this method saves reasoning content to response_data (for local result file) if present in the response,
-        but does not include it in the chat history.
+        Some OpenAI-compatible models expose reasoning content in the response,
+        commonly as `reasoning_content` or `reasoning`.
+    
+        This method stores reasoning content separately in response_data for logging.
+    
+        By default, reasoning content is not inserted into the next-turn chat history,
+        because many OpenAI-compatible endpoints reject unsupported message fields.
+    
+        If preserve_reasoning_in_history=True, reasoning content is also inserted into
+        model_responses_message_for_chat_history. Only enable this for endpoints that
+        explicitly support receiving prior reasoning in chat history.
         """
-        # Original assistant message object (contains `reasoning_content` on DeepSeek).
         message = api_response.choices[0].message
+    
+        reasoning_content = getattr(message, "reasoning_content", None)
+        if reasoning_content is None:
+            reasoning_content = getattr(message, "reasoning", None)
+    
+        tool_calls = getattr(message, "tool_calls", None) or []
+    
+        assistant_message = {
+            "role": "assistant",
+            "content": message.content,
+        }
+    
+        if tool_calls:
+            assistant_message["tool_calls"] = [
+                {
+                    "id": tool_call.id,
+                    "type": tool_call.type,
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments,
+                    },
+                }
+                for tool_call in tool_calls
+            ]
+    
+        # Always store a clean, serializable assistant message for chat history.
+        
+    
+        # Store reasoning separately for local logs/results.
+        if reasoning_content is not None:
+            response_data["reasoning_content"] = reasoning_content
+    
+            # For your own /v1 model: optionally pass reasoning into the next turn.
+            if preserve_reasoning_in_history:
+                assistant_message["reasoning_content"] = reasoning_content
 
-        # Preserve tool_call information but strip the unsupported `reasoning_content` field before inserting into chat history.
-        if getattr(message, "tool_calls", None):
-            assistant_message = {
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tool_call.id,
-                        "type": tool_call.type,
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }
-                    for tool_call in message.tool_calls
-                ],
-            }
-            response_data["model_responses_message_for_chat_history"] = assistant_message
-
-        # If no tool_calls, we still need to strip reasoning_content.
-        elif hasattr(message, "reasoning_content"):
-            response_data["model_responses_message_for_chat_history"] = {
-                "role": "assistant",
-                "content": message.content,
-            }
-
-        # Capture the reasoning trace so it can be logged to the local result file.
-        if hasattr(message, "reasoning_content"):
-            response_data["reasoning_content"] = message.reasoning_content
+        response_data["model_responses_message_for_chat_history"] = assistant_message
 
     #### Prompting methods ####
 
